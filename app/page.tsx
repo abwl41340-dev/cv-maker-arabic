@@ -1,157 +1,107 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useMemo, useRef, useState } from 'react';
 
-const formatMeta: Record<string, string> = {
-  png: 'PNG — صورة', jpg: 'JPG — صورة', jpeg: 'JPG — صورة', webp: 'WEBP — صورة',
-  avif: 'AVIF — صورة', bmp: 'BMP — صورة', pdf: 'PDF — مستند', txt: 'TXT — نص',
-  md: 'Markdown', html: 'HTML', json: 'JSON', csv: 'CSV', xml: 'XML', docx: 'DOCX — Word',
+const formats: Record<string, string> = {
+  png: 'PNG صورة', jpg: 'JPG صورة', jpeg: 'JPEG صورة', webp: 'WEBP صورة', avif: 'AVIF صورة', bmp: 'BMP صورة',
+  pdf: 'PDF مستند', docx: 'Word DOCX', xlsx: 'Excel XLSX', xlsm: 'Excel XLSM', txt: 'نص TXT', md: 'Markdown',
+  html: 'HTML', htm: 'HTML', json: 'JSON', csv: 'CSV', xml: 'XML',
 };
-
-const imageInputs = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp'];
-const textInputs = ['txt', 'md', 'html', 'json', 'csv', 'xml', 'docx'];
-const imageOutputs = ['png', 'jpg', 'webp', 'avif', 'pdf'];
-const outputMap: Record<string, string[]> = {
-  png: imageOutputs.filter((x) => x !== 'png'), jpg: imageOutputs.filter((x) => x !== 'jpg'),
-  jpeg: imageOutputs.filter((x) => x !== 'jpg'), webp: imageOutputs.filter((x) => x !== 'webp'),
-  avif: imageOutputs.filter((x) => x !== 'avif'), bmp: imageOutputs.filter((x) => x !== 'bmp'),
-  txt: ['md', 'html', 'json', 'docx'], md: ['txt', 'html', 'docx'],
-  html: ['txt', 'md', 'docx'], json: ['txt', 'csv', 'html', 'docx'],
-  csv: ['txt', 'json', 'docx'], xml: ['txt'], docx: ['txt', 'md', 'html'],
+const outputs: Record<string, string[]> = {
+  png: ['jpg', 'webp', 'avif', 'pdf'], jpg: ['png', 'webp', 'avif', 'pdf'], jpeg: ['png', 'webp', 'avif', 'pdf'],
+  webp: ['png', 'jpg', 'avif', 'pdf'], avif: ['png', 'jpg', 'webp', 'pdf'], bmp: ['png', 'jpg', 'webp', 'pdf'],
+  pdf: ['txt', 'docx', 'md'], txt: ['md', 'html', 'json', 'docx'], md: ['txt', 'html', 'docx'],
+  html: ['txt', 'md', 'docx'], htm: ['txt', 'md', 'docx'], json: ['txt', 'csv', 'html', 'docx'],
+  csv: ['txt', 'json', 'xlsx', 'docx'], xml: ['txt'], docx: ['txt', 'md', 'html'], xlsx: ['csv', 'json', 'txt'], xlsm: ['csv', 'json', 'txt'],
 };
-const maxBytes = 4 * 1024 * 1024;
-
-function getExtension(name: string) { return (name.split('.').pop() || '').toLowerCase(); }
-function bytesToLabel(size: number) {
-  if (size < 1024) return `${size} بايت`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-}
+const MAX_TOTAL = 4 * 1024 * 1024;
+const extension = (name: string) => (name.split('.').pop() || '').toLowerCase();
+const sizeLabel = (size: number) => size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(2)} MB`;
 
 export default function HomePage() {
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [sourceFormat, setSourceFormat] = useState('');
-  const [targetFormat, setTargetFormat] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [target, setTarget] = useState('');
   const [dragging, setDragging] = useState(false);
-  const [status, setStatus] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
-  const [downloadName, setDownloadName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<{ type: string; message: string } | null>(null);
+  const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
 
-  const availableTargets = useMemo(() => (file ? outputMap[sourceFormat] || [] : []), [file, sourceFormat]);
+  const commonTargets = useMemo(() => {
+    if (!files.length) return [];
+    return (outputs[extension(files[0].name)] || []).filter((targetFormat) => files.every((file) => (outputs[extension(file.name)] || []).includes(targetFormat)));
+  }, [files]);
+  const allPdf = files.length > 1 && files.every((file) => extension(file.name) === 'pdf');
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
 
-  const clearDownload = () => {
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-    setDownloadUrl(null);
-    setDownloadName('');
-  };
-
-  const handleSelectFile = (selected?: File) => {
-    if (!selected) return;
-    clearDownload();
-    setStatus(null);
-    const ext = getExtension(selected.name);
-    if (!(imageInputs.includes(ext) || textInputs.includes(ext))) {
-      setFile(null);
-      setSourceFormat('');
-      setTargetFormat('');
-      setStatus({ type: 'error', message: 'هذه الصيغة غير مدعومة. اختر صورة أو TXT أو MD أو HTML أو JSON أو CSV أو XML أو DOCX.' });
-      return;
+  function clearDownload() {
+    if (download) URL.revokeObjectURL(download.url);
+    setDownload(null);
+  }
+  function addFiles(list: FileList | File[]) {
+    const incoming = Array.from(list);
+    if (!incoming.length) return;
+    const combined = [...files, ...incoming].slice(0, 8);
+    if (incoming.some((file) => !outputs[extension(file.name)])) {
+      setStatus({ type: 'error', message: 'توجد صيغة غير مدعومة. راجع الصيغ المتاحة أسفل منطقة الرفع.' }); return;
     }
-    if (selected.size > maxBytes) {
-      setFile(null);
-      setSourceFormat('');
-      setTargetFormat('');
-      setStatus({ type: 'error', message: 'الحد الأقصى لحجم الملف 4 ميجابايت في نسخة Vercel التجريبية.' });
-      return;
+    if (combined.reduce((sum, file) => sum + file.size, 0) > MAX_TOTAL) {
+      setStatus({ type: 'error', message: 'الحد الأقصى لحجم جميع الملفات هو 4 ميجابايت على Vercel.' }); return;
     }
-    setFile(selected);
-    setSourceFormat(ext);
-    setTargetFormat('');
-  };
-
-  const onConvert = async () => {
-    if (!file || !targetFormat) {
-      setStatus({ type: 'error', message: 'يرجى اختيار ملف ثم تحديد صيغة التحويل.' });
-      return;
-    }
-    setIsLoading(true);
-    setStatus({ type: 'info', message: 'جارٍ تحويل الملف على خادم التطبيق…' });
-    clearDownload();
+    clearDownload(); setStatus(null); setFiles(combined); setTarget('');
+  }
+  function removeFile(index: number) {
+    clearDownload(); setFiles(files.filter((_, i) => i !== index)); setTarget(''); setStatus(null);
+  }
+  function onDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files);
+  }
+  function onInput(event: ChangeEvent<HTMLInputElement>) {
+    if (event.target.files) addFiles(event.target.files);
+    event.target.value = '';
+  }
+  async function convert(action = 'convert') {
+    if (!files.length || (action === 'convert' && !target)) return;
+    setBusy(true); setStatus({ type: 'info', message: action === 'merge-pdf' ? 'جارٍ دمج ملفات PDF…' : 'جارٍ تحويل الملفات…' }); clearDownload();
     try {
       const form = new FormData();
-      form.append('file', file);
-      form.append('targetFormat', targetFormat);
+      files.forEach((file) => form.append('files', file));
+      form.append('targetFormat', target);
+      form.append('action', action);
       const response = await fetch('/api/convert', { method: 'POST', body: form });
       if (!response.ok) {
-        let message = 'فشل التحويل.';
-        try { const data = await response.json(); message = data.error || message; }
-        catch { message = (await response.text()) || message; }
-        throw new Error(message);
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || 'تعذر تحويل الملفات.');
       }
       const blob = await response.blob();
       const disposition = response.headers.get('Content-Disposition') || '';
-      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-      const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
-      const base = file.name.replace(/\.[^/.]+$/, '') || 'converted-file';
-      const name = encodedName ? decodeURIComponent(encodedName) : plainName || `${base}.${targetFormat}`;
-      const url = URL.createObjectURL(blob);
-      setDownloadUrl(url);
-      setDownloadName(name);
-      setStatus({ type: 'success', message: 'اكتمل التحويل؛ الملف جاهز للتنزيل.' });
+      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+      const name = encoded ? decodeURIComponent(encoded) : plain || (files.length > 1 ? 'converted-files.zip' : `${files[0].name.replace(/\.[^.]+$/, '')}.${target}`);
+      setDownload({ url: URL.createObjectURL(blob), name });
+      setStatus({ type: 'success', message: 'اكتملت العملية. حمل النتيجة قبل بدء تحويل جديد.' });
     } catch (error) {
-      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'تعذر إكمال التحويل.' });
-    } finally { setIsLoading(false); }
-  };
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'حدث خطأ غير متوقع.' });
+    } finally { setBusy(false); }
+  }
 
-  const resetFile = () => {
-    clearDownload(); setFile(null); setSourceFormat(''); setTargetFormat(''); setStatus(null);
-    if (inputRef.current) inputRef.current.value = '';
-  };
-
-  return (
-    <main className="page-shell">
-      <header className="topbar shell">
-        <div className="brand-wrap"><div className="brand-mark">✦</div><div className="brand-text">صيغة</div></div>
-        <div className="status-pill"><span className="dot" /> خصوصية: التحويل عبر خادم الموقع</div>
-      </header>
-      <section className="shell hero">
-        <div className="eyebrow">محوّل ملفات عملي وسهل</div>
-        <h1>حوّل ملفاتك إلى <span>الصيغة المناسبة</span></h1>
-        <p>حوّل الصور والمستندات والبيانات بين صيغ مختارة. ارفع الملف، اختر الصيغة، ثم نزّل النتيجة.</p>
-        <div className="chips"><span>PNG</span><span>JPG</span><span>WEBP</span><span>PDF للصور</span><span>TXT</span><span>JSON</span><span>CSV</span><span>HTML</span><span>DOCX</span></div>
-      </section>
-      <section className="shell app-box">
-        <div className={`dropzone ${dragging ? 'dragging' : ''}`}
-          onClick={() => inputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => { e.preventDefault(); setDragging(false); handleSelectFile(e.dataTransfer.files?.[0]); }}
-          role="button" tabIndex={0} aria-label="اختر ملفاً أو اسحبه هنا"
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inputRef.current?.click(); } }}>
-          <div className="upload-box"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M5 17v1a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-1"/></svg></div>
-          <h3>اسحب ملفك هنا</h3><p>أو اختره من جهازك — الحد الأقصى 4 ميجابايت</p>
-          <button type="button" className="primary-btn" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}>اختيار ملف</button>
-          <input ref={inputRef} type="file" className="hidden-input" onChange={(e) => handleSelectFile(e.target.files?.[0])}
-            accept=".png,.jpg,.jpeg,.webp,.avif,.bmp,.txt,.md,.markdown,.html,.htm,.json,.csv,.xml,.docx" />
-        </div>
-        {file && <div className="file-row"><div className="file-icon">{sourceFormat.toUpperCase()}</div><div className="file-info"><div className="file-name">{file.name}</div><div className="file-meta">{bytesToLabel(file.size)} · {formatMeta[sourceFormat] || sourceFormat.toUpperCase()}</div></div><button type="button" className="remove-btn" onClick={resetFile} aria-label="إزالة الملف">×</button></div>}
-        <div className="converter-row">
-          <div className="field-box"><label>الصيغة الحالية</label><div className="field-value"><span className="mini-dot"/><span>{sourceFormat ? formatMeta[sourceFormat] || sourceFormat.toUpperCase() : 'لم يتم اختيار ملف'}</span></div></div>
-          <div className="swap-btn" aria-hidden="true">⇄</div>
-          <div className="field-box"><label htmlFor="target-format">التحويل إلى</label><div className="select-wrap"><select id="target-format" value={targetFormat} onChange={(e) => { setTargetFormat(e.target.value); setStatus(null); }} disabled={!file || !availableTargets.length}><option value="">اختر الصيغة</option>{availableTargets.map((format) => <option key={format} value={format}>{formatMeta[format] || format.toUpperCase()}</option>)}</select></div></div>
-        </div>
-        <button type="button" className="action-btn" onClick={onConvert} disabled={!file || !targetFormat || isLoading}>{isLoading ? <span className="spinner"/> : <span>⇩</span>}{isLoading ? 'جارٍ التحويل…' : 'تحويل الملف'}</button>
-        {status && <div className={`status ${status.type}`} role="status" aria-live="polite">{status.message}</div>}
-        {downloadUrl && <div className="download-box"><div><div className="download-title">ملف جاهز للتنزيل</div><div className="download-name">{downloadName}</div></div><a className="download-btn" href={downloadUrl} download={downloadName}>تنزيل</a></div>}
-      </section>
-      <section className="shell features">
-        <div className="feature-card"><div className="feature-icon">⚡</div><div><h4>سريع</h4><p>واجهة مباشرة وتحويلات محددة للأنواع المدعومة.</p></div></div>
-        <div className="feature-card"><div className="feature-icon">🔒</div><div><h4>بلا تخزين دائم</h4><p>يعالج الخادم الملف للطلب ولا يوفّر مساحة تخزين أو سجل تنزيل.</p></div></div>
-        <div className="feature-card"><div className="feature-icon">📦</div><div><h4>صيغ واضحة</h4><p>صور ومستندات وبيانات، مع إظهار خيارات التحويل المناسبة لكل ملف.</p></div></div>
-      </section>
-      <footer className="shell footer">لا يدعم التطبيق كل صيغ الملفات. تتم معالجة الملفات مؤقتاً على خادم Vercel؛ لا ترفع ملفات حساسة.</footer>
-    </main>
-  );
+  return <main className="app-shell">
+    <header className="topbar wrap"><a className="brand" href="#" aria-label="صيغة الرئيسية"><span className="brand-icon">S</span><span>صيغة<span className="brand-dot">.</span></span></a><div className="top-links"><span className="secure"><i/> معالجة مؤقتة وآمنة</span><a href="#formats">الصيغ المدعومة</a></div></header>
+    <section className="hero wrap"><div className="hero-kicker"><span>✦</span> مساحة عملك للتحويل</div><h1>كل ملفاتك، <em>في الصيغة المناسبة.</em></h1><p>حوّل المستندات والصور والبيانات، أو ادمج ملفات PDF — من واجهة واحدة بسيطة وواضحة.</p><div className="hero-stats"><span><b>15+</b> صيغة مدعومة</span><span className="stat-sep"/><span><b>8</b> ملفات بالدفعة</span><span className="stat-sep"/><span><b>0</b> تخزين دائم</span></div></section>
+    <section className="converter wrap"><div className="converter-head"><div><div className="section-label">أداة التحويل</div><h2>ابدأ بملفاتك</h2></div><div className="privacy-tag"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></svg> لا نحتفظ بملفاتك</div></div>
+      <div className={`dropzone ${dragging ? 'is-dragging' : ''}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} role="button" tabIndex={0} aria-label="اختر الملفات أو اسحبها هنا" onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inputRef.current?.click(); } }}>
+        <div className="upload-symbol"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 15V3m0 0L7 8m5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg></div><h3>اسحب الملفات وأفلتها هنا</h3><p>أو <button type="button" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}>تصفح جهازك</button> — حتى 8 ملفات، وبإجمالي لا يتجاوز 4 ميجابايت</p><div className="upload-support">صور · PDF · Word · Excel · CSV · JSON</div><input ref={inputRef} className="visually-hidden" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.avif,.bmp,.pdf,.txt,.md,.html,.htm,.json,.csv,.xml,.docx,.xlsx,.xlsm" onChange={onInput}/>
+      </div>
+      {files.length > 0 && <div className="file-list"><div className="file-list-head"><span>الملفات المختارة <b>{files.length}</b></span><span>{sizeLabel(totalSize)} / 4 MB</span></div>{files.map((file, index) => <div className="file-item" key={`${file.name}-${index}`}><span className={`file-badge badge-${extension(file.name)}`}>{extension(file.name).slice(0,4).toUpperCase()}</span><div className="file-details"><strong>{file.name}</strong><small>{formats[extension(file.name)] || extension(file.name).toUpperCase()} · {sizeLabel(file.size)}</small></div><button className="remove-file" type="button" onClick={() => removeFile(index)} aria-label={`إزالة ${file.name}`}>×</button></div>)}</div>}
+      <div className="convert-controls"><div className="format-field"><label>من</label><div className="format-value">{files.length === 0 ? 'اختر ملفات للبدء' : files.length === 1 ? formats[extension(files[0].name)] : `${files.length} ملفات مختارة`}<span>▾</span></div></div><span className="arrow">←</span><div className="format-field"><label htmlFor="target-format">إلى</label><select id="target-format" value={target} disabled={!files.length || !commonTargets.length} onChange={(e) => setTarget(e.target.value)}><option value="">{files.length ? 'اختر صيغة الإخراج' : 'بانتظار الملفات'}</option>{commonTargets.map((format) => <option key={format} value={format}>{formats[format] || format.toUpperCase()}</option>)}</select></div></div>
+      <button className="convert-button" type="button" onClick={() => convert()} disabled={!files.length || !target || busy}>{busy ? <span className="loading-ring"/> : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3"/></svg>}{busy ? 'جارٍ المعالجة…' : files.length > 1 ? `تحويل ${files.length} ملفات` : 'تحويل الملف'}</button>
+      {allPdf && <button className="merge-button" type="button" disabled={busy} onClick={() => convert('merge-pdf')}>＋ دمج ملفات PDF في مستند واحد</button>}
+      {status && <div className={`notice notice-${status.type}`} role="status" aria-live="polite">{status.message}</div>}
+      {download && <div className="result-card"><div className="result-check">✓</div><div className="result-info"><strong>ملفك جاهز</strong><span>{download.name}</span></div><a href={download.url} download={download.name} className="download-button">تنزيل <span>↓</span></a></div>}
+      <p className="privacy-note">تعالج الملفات مؤقتاً في خادم التطبيق لإنتاج النتيجة، ثم تُرسل إليك مباشرة دون تخزين دائم. لا ترفع بيانات شديدة الحساسية.</p>
+    </section>
+    <section className="wrap tools-section" id="formats"><div className="section-label">أدوات عملية</div><h2>ماذا يمكنك أن تفعل؟</h2><div className="tool-grid"><article className="tool-card"><span className="tool-icon purple">▧</span><div><h3>تحويل الصور</h3><p>PNG وJPG وWEBP وAVIF، مع تحويل الصور إلى PDF.</p></div></article><article className="tool-card"><span className="tool-icon rose">▤</span><div><h3>مستندات PDF وWord</h3><p>استخراج النص من PDF، إنشاء DOCX، وقراءة نص مستندات Word.</p></div></article><article className="tool-card"><span className="tool-icon green">▦</span><div><h3>Excel وبيانات</h3><p>قراءة أول ورقة عمل من XLSX وتحويلها إلى CSV أو JSON.</p></div></article><article className="tool-card"><span className="tool-icon blue">⇄</span><div><h3>تحويل دفعي</h3><p>حوّل عدة ملفات إلى الصيغة نفسها ونزّلها في ZIP واحد.</p></div></article><article className="tool-card"><span className="tool-icon amber">⊕</span><div><h3>دمج ملفات PDF</h3><p>اجمع عدة ملفات PDF في مستند واحد بالترتيب المختار.</p></div></article><article className="tool-card"><span className="tool-icon slate">⌘</span><div><h3>بيانات منظمة</h3><p>تحويل JSON وCSV وTXT وMarkdown وHTML بين صيغ مناسبة.</p></div></article></div></section>
+    <section className="wrap limitations"><strong>تنبيه حول الدعم:</strong> لا توجد أداة واحدة تحول كل الملفات بلا حدود. هذا الإصدار لا يحول DOCX إلى PDF، ولا يدعم XLSX إلى PDF، ولا يحول الصوت أو الفيديو. ملفات XLSX تستخدم أول ورقة عمل فقط؛ خلايا المعادلات تعرض قيمة Excel المخزنة. حد الملفات 4 ميجابايت بسبب حدود Vercel، وقد لا يستخرج PDF الممسوح ضوئياً نصاً دون OCR.</section>
+    <footer className="wrap footer"><a className="brand footer-brand" href="#"><span className="brand-icon">S</span><span>صيغة<span className="brand-dot">.</span></span></a><span>تحويل واضح. ملفاتك لك.</span><span>© صيغة</span></footer>
+  </main>;
 }
