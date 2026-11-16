@@ -2,33 +2,26 @@
 
 import { useMemo, useRef, useState } from 'react';
 
-const formatMeta: Record<string, { label: string; group: 'images' | 'documents' | 'data' }> = {
-  png: { label: 'PNG', group: 'images' },
-  jpg: { label: 'JPG', group: 'images' },
-  jpeg: { label: 'JPG', group: 'images' },
-  webp: { label: 'WEBP', group: 'images' },
-  avif: { label: 'AVIF', group: 'images' },
-  bmp: { label: 'BMP', group: 'images' },
-  pdf: { label: 'PDF', group: 'documents' },
-  txt: { label: 'TXT', group: 'documents' },
-  md: { label: 'MD', group: 'documents' },
-  html: { label: 'HTML', group: 'documents' },
-  json: { label: 'JSON', group: 'data' },
-  csv: { label: 'CSV', group: 'data' },
-  xml: { label: 'XML', group: 'data' },
-  docx: { label: 'DOCX', group: 'documents' },
-  zip: { label: 'ZIP', group: 'documents' },
+const formatMeta: Record<string, string> = {
+  png: 'PNG — صورة', jpg: 'JPG — صورة', jpeg: 'JPG — صورة', webp: 'WEBP — صورة',
+  avif: 'AVIF — صورة', bmp: 'BMP — صورة', pdf: 'PDF — مستند', txt: 'TXT — نص',
+  md: 'Markdown', html: 'HTML', json: 'JSON', csv: 'CSV', xml: 'XML', docx: 'DOCX — Word',
 };
 
-const imageFormats = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp', 'pdf'];
-const documentFormats = ['txt', 'md', 'html', 'json', 'csv', 'xml', 'docx', 'pdf'];
+const imageInputs = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp'];
+const textInputs = ['txt', 'md', 'html', 'json', 'csv', 'xml', 'docx'];
+const imageOutputs = ['png', 'jpg', 'webp', 'avif', 'pdf'];
+const outputMap: Record<string, string[]> = {
+  png: imageOutputs.filter((x) => x !== 'png'), jpg: imageOutputs.filter((x) => x !== 'jpg'),
+  jpeg: imageOutputs.filter((x) => x !== 'jpg'), webp: imageOutputs.filter((x) => x !== 'webp'),
+  avif: imageOutputs.filter((x) => x !== 'avif'), bmp: imageOutputs.filter((x) => x !== 'bmp'),
+  txt: ['md', 'html', 'json', 'docx'], md: ['txt', 'html', 'docx'],
+  html: ['txt', 'md', 'docx'], json: ['txt', 'csv', 'html', 'docx'],
+  csv: ['txt', 'json', 'docx'], xml: ['txt'], docx: ['txt', 'md', 'html'],
+};
+const maxBytes = 4 * 1024 * 1024;
 
-const supportedFormats = [...new Set([...imageFormats, ...documentFormats])];
-
-function getExtension(name: string) {
-  return (name.split('.').pop() || '').toLowerCase();
-}
-
+function getExtension(name: string) { return (name.split('.').pop() || '').toLowerCase(); }
 function bytesToLabel(size: number) {
   if (size < 1024) return `${size} بايت`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -46,28 +39,33 @@ export default function HomePage() {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadName, setDownloadName] = useState('');
 
-  const availableTargets = useMemo(() => {
-    if (!file) return [];
+  const availableTargets = useMemo(() => (file ? outputMap[sourceFormat] || [] : []), [file, sourceFormat]);
 
-    const ext = getExtension(file.name);
-    const all = supportedFormats.filter((v) => v !== ext);
-    const preferred = ext === 'jpg' || ext === 'jpeg' ? ['png', 'webp', 'pdf', 'txt', 'json', 'jpg'] : all;
-
-    const set = new Set(preferred.filter((v) => supportedFormats.includes(v)));
-    return Array.from(set).map((value) => ({ value, label: formatMeta[value]?.label || value.toUpperCase() }));
-  }, [file]);
-
-  const handleSelectFile = (selected: File | undefined) => {
-    setStatus(null);
+  const clearDownload = () => {
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     setDownloadUrl(null);
-    if (!selected) return;
+    setDownloadName('');
+  };
 
+  const handleSelectFile = (selected?: File) => {
+    if (!selected) return;
+    clearDownload();
+    setStatus(null);
     const ext = getExtension(selected.name);
-    if (!supportedFormats.includes(ext)) {
-      setStatus({ type: 'error', message: `نوع الملف ${ext || 'غير معروف'} غير مدعوم في هذه النسخة. حاول JPG، PNG، PDF، TXT، JSON، CSV، HTML أو DOCX.` });
+    if (!(imageInputs.includes(ext) || textInputs.includes(ext))) {
+      setFile(null);
+      setSourceFormat('');
+      setTargetFormat('');
+      setStatus({ type: 'error', message: 'هذه الصيغة غير مدعومة. اختر صورة أو TXT أو MD أو HTML أو JSON أو CSV أو XML أو DOCX.' });
       return;
     }
-
+    if (selected.size > maxBytes) {
+      setFile(null);
+      setSourceFormat('');
+      setTargetFormat('');
+      setStatus({ type: 'error', message: 'الحد الأقصى لحجم الملف 4 ميجابايت في نسخة Vercel التجريبية.' });
+      return;
+    }
     setFile(selected);
     setSourceFormat(ext);
     setTargetFormat('');
@@ -78,212 +76,82 @@ export default function HomePage() {
       setStatus({ type: 'error', message: 'يرجى اختيار ملف ثم تحديد صيغة التحويل.' });
       return;
     }
-
     setIsLoading(true);
-    setStatus({ type: 'info', message: 'جارٍ التحويل...' });
-
+    setStatus({ type: 'info', message: 'جارٍ تحويل الملف على خادم التطبيق…' });
+    clearDownload();
     try {
       const form = new FormData();
       form.append('file', file);
       form.append('targetFormat', targetFormat);
-
-      const response = await fetch('/api/convert', {
-        method: 'POST',
-        body: form,
-      });
-
+      const response = await fetch('/api/convert', { method: 'POST', body: form });
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || 'فشل التحويل.');
+        let message = 'فشل التحويل.';
+        try { const data = await response.json(); message = data.error || message; }
+        catch { message = (await response.text()) || message; }
+        throw new Error(message);
       }
-
       const blob = await response.blob();
-      const disposition = response.headers.get('Content-Disposition');
-      const fileNameFromHeader = disposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1] || disposition?.match(/filename="([^"]+)"/)?.[1];
-      const base = file.name.replace(/\.[^/.]+$/, '');
-      const name = decodeURIComponent(fileNameFromHeader || `${base}.${targetFormat}`);
-
-      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+      const base = file.name.replace(/\.[^/.]+$/, '') || 'converted-file';
+      const name = encodedName ? decodeURIComponent(encodedName) : plainName || `${base}.${targetFormat}`;
       const url = URL.createObjectURL(blob);
       setDownloadUrl(url);
       setDownloadName(name);
-      setStatus({ type: 'success', message: 'تمت العملية بنجاح، الملف جاهز للتنزيل.' });
-    } catch (error: any) {
-      setStatus({ type: 'error', message: error?.message || 'تعذر إكمال التحويل.' });
-    } finally {
-      setIsLoading(false);
-    }
+      setStatus({ type: 'success', message: 'اكتمل التحويل؛ الملف جاهز للتنزيل.' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'تعذر إكمال التحويل.' });
+    } finally { setIsLoading(false); }
   };
 
-  const handleDownload = () => {
-    if (!downloadUrl) return;
-    const link = document.createElement('a');
-    link.href = downloadUrl;
-    link.download = downloadName;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+  const resetFile = () => {
+    clearDownload(); setFile(null); setSourceFormat(''); setTargetFormat(''); setStatus(null);
+    if (inputRef.current) inputRef.current.value = '';
   };
 
   return (
     <main className="page-shell">
       <header className="topbar shell">
-        <div className="brand-wrap">
-          <div className="brand-mark">✦</div>
-          <div className="brand-text">صيغة</div>
-        </div>
-        <div className="status-pill">
-          <span className="dot" /> معالجة محلية وآمنة
-        </div>
+        <div className="brand-wrap"><div className="brand-mark">✦</div><div className="brand-text">صيغة</div></div>
+        <div className="status-pill"><span className="dot" /> خصوصية: التحويل عبر خادم الموقع</div>
       </header>
-
       <section className="shell hero">
-        <div className="eyebrow">محول إنترنت + ملفات</div>
-        <h1>
-          حول أي ملف إلى <span>صيغة مناسبة لك</span>
-        </h1>
-        <p>
-          أداة احترافية لتحويل الصور والملفات النصية والوثائق بين الصيغ الشائعة بدون رفع الملفات إلى خادم خارجي.
-        </p>
-        <div className="chips">
-          <span>PNG</span>
-          <span>JPG</span>
-          <span>WEBP</span>
-          <span>PDF</span>
-          <span>TXT</span>
-          <span>JSON</span>
-          <span>CSV</span>
-          <span>HTML</span>
-          <span>DOCX</span>
-        </div>
+        <div className="eyebrow">محوّل ملفات عملي وسهل</div>
+        <h1>حوّل ملفاتك إلى <span>الصيغة المناسبة</span></h1>
+        <p>حوّل الصور والمستندات والبيانات بين صيغ مختارة. ارفع الملف، اختر الصيغة، ثم نزّل النتيجة.</p>
+        <div className="chips"><span>PNG</span><span>JPG</span><span>WEBP</span><span>PDF للصور</span><span>TXT</span><span>JSON</span><span>CSV</span><span>HTML</span><span>DOCX</span></div>
       </section>
-
       <section className="shell app-box">
-        <div
-          className={`dropzone ${dragging ? 'dragging' : ''}`}
+        <div className={`dropzone ${dragging ? 'dragging' : ''}`}
           onClick={() => inputRef.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            handleSelectFile(e.dataTransfer.files?.[0]);
-          }}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              inputRef.current?.click();
-            }
-          }}
-        >
-          <div className="upload-box">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M12 16V4m0 0-4 4m4-4 4 4" />
-              <path d="M5 17v1a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-1" />
-            </svg>
-          </div>
-          <h3>اسحب ملفك هنا</h3>
-          <p>أو اختره من جهازك مباشرة</p>
-          <button type="button" className="primary-btn">اختيار ملف</button>
-          <input
-            ref={inputRef}
-            type="file"
-            className="hidden-input"
-            onChange={(e) => handleSelectFile(e.target.files?.[0])}
-            accept=".png,.jpg,.jpeg,.webp,.avif,.bmp,.pdf,.txt,.md,.html,.json,.csv,.xml,.docx,.zip"
-          />
+          onDrop={(e) => { e.preventDefault(); setDragging(false); handleSelectFile(e.dataTransfer.files?.[0]); }}
+          role="button" tabIndex={0} aria-label="اختر ملفاً أو اسحبه هنا"
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inputRef.current?.click(); } }}>
+          <div className="upload-box"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M5 17v1a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-1"/></svg></div>
+          <h3>اسحب ملفك هنا</h3><p>أو اختره من جهازك — الحد الأقصى 4 ميجابايت</p>
+          <button type="button" className="primary-btn" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}>اختيار ملف</button>
+          <input ref={inputRef} type="file" className="hidden-input" onChange={(e) => handleSelectFile(e.target.files?.[0])}
+            accept=".png,.jpg,.jpeg,.webp,.avif,.bmp,.txt,.md,.markdown,.html,.htm,.json,.csv,.xml,.docx" />
         </div>
-
-        {file && (
-          <div className="file-row">
-            <div className="file-icon">{(sourceFormat || 'FILE').toUpperCase().slice(0, 5)}</div>
-            <div className="file-info">
-              <div className="file-name">{file.name}</div>
-              <div className="file-meta">{bytesToLabel(file.size)} • {formatMeta[sourceFormat]?.label || sourceFormat.toUpperCase()}</div>
-            </div>
-            <button type="button" className="remove-btn" onClick={() => { setFile(null); setSourceFormat(''); setTargetFormat(''); setStatus(null); setDownloadUrl(null); if (inputRef.current) inputRef.current.value = ''; }}>
-              ×
-            </button>
-          </div>
-        )}
-
+        {file && <div className="file-row"><div className="file-icon">{sourceFormat.toUpperCase()}</div><div className="file-info"><div className="file-name">{file.name}</div><div className="file-meta">{bytesToLabel(file.size)} · {formatMeta[sourceFormat] || sourceFormat.toUpperCase()}</div></div><button type="button" className="remove-btn" onClick={resetFile} aria-label="إزالة الملف">×</button></div>}
         <div className="converter-row">
-          <div className="field-box">
-            <label>الصيغة الحالية</label>
-            <div className="field-value">
-              <span className="mini-dot" />
-              <span>{sourceFormat ? formatMeta[sourceFormat]?.label || sourceFormat.toUpperCase() : 'لم يتم اختيار ملف'}</span>
-            </div>
-          </div>
-
-          <button type="button" className="swap-btn" onClick={() => {
-            if (!file || !targetFormat) return;
-            const oldSource = sourceFormat;
-            setSourceFormat(targetFormat);
-            setTargetFormat(oldSource);
-          }}>
-            ⇄
-          </button>
-
-          <div className="field-box">
-            <label>التحويل إلى</label>
-            <div className="select-wrap">
-              <select value={targetFormat} onChange={(e) => setTargetFormat(e.target.value)} disabled={!file || !availableTargets.length}>
-                <option value="">اختر الصيغة</option>
-                {availableTargets.map((item) => (
-                  <option key={item.value} value={item.value}>{item.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          <div className="field-box"><label>الصيغة الحالية</label><div className="field-value"><span className="mini-dot"/><span>{sourceFormat ? formatMeta[sourceFormat] || sourceFormat.toUpperCase() : 'لم يتم اختيار ملف'}</span></div></div>
+          <div className="swap-btn" aria-hidden="true">⇄</div>
+          <div className="field-box"><label htmlFor="target-format">التحويل إلى</label><div className="select-wrap"><select id="target-format" value={targetFormat} onChange={(e) => { setTargetFormat(e.target.value); setStatus(null); }} disabled={!file || !availableTargets.length}><option value="">اختر الصيغة</option>{availableTargets.map((format) => <option key={format} value={format}>{formatMeta[format] || format.toUpperCase()}</option>)}</select></div></div>
         </div>
-
-        <button type="button" className="action-btn" onClick={onConvert} disabled={!file || !targetFormat || isLoading}>
-          {isLoading ? <span className="spinner" /> : <span>⇩</span>}
-          {isLoading ? 'جارٍ التحويل...' : 'تحويل الملف'}
-        </button>
-
-        {status && <div className={`status ${status.type}`}>{status.message}</div>}
-
-        {downloadUrl && (
-          <div className="download-box">
-            <div>
-              <div className="download-title">ملف جاهز للتنزيل</div>
-              <div className="download-name">{downloadName}</div>
-            </div>
-            <button type="button" className="download-btn" onClick={handleDownload}>تنزيل</button>
-          </div>
-        )}
+        <button type="button" className="action-btn" onClick={onConvert} disabled={!file || !targetFormat || isLoading}>{isLoading ? <span className="spinner"/> : <span>⇩</span>}{isLoading ? 'جارٍ التحويل…' : 'تحويل الملف'}</button>
+        {status && <div className={`status ${status.type}`} role="status" aria-live="polite">{status.message}</div>}
+        {downloadUrl && <div className="download-box"><div><div className="download-title">ملف جاهز للتنزيل</div><div className="download-name">{downloadName}</div></div><a className="download-btn" href={downloadUrl} download={downloadName}>تنزيل</a></div>}
       </section>
-
       <section className="shell features">
-        <div className="feature-card">
-          <div className="feature-icon">⚡</div>
-          <div>
-            <h4>سريع</h4>
-            <p>تحويل فوري للملفات المشهورة في ثوانٍ.</p>
-          </div>
-        </div>
-        <div className="feature-card">
-          <div className="feature-icon">🔒</div>
-          <div>
-            <h4>آمن</h4>
-            <p>المعالجة داخل المتصفح أو الخادم الخاص بك دون مشاركة الملفات مع جهات خارجية.</p>
-          </div>
-        </div>
-        <div className="feature-card">
-          <div className="feature-icon">📦</div>
-          <div>
-            <h4>متعدد</h4>
-            <p>صور، نصوص، بيانات، ملفات PDF، DOCX، ZIP، وأدوات تحويل ذات قيمة مرتفعة.</p>
-          </div>
-        </div>
+        <div className="feature-card"><div className="feature-icon">⚡</div><div><h4>سريع</h4><p>واجهة مباشرة وتحويلات محددة للأنواع المدعومة.</p></div></div>
+        <div className="feature-card"><div className="feature-icon">🔒</div><div><h4>بلا تخزين دائم</h4><p>يعالج الخادم الملف للطلب ولا يوفّر مساحة تخزين أو سجل تنزيل.</p></div></div>
+        <div className="feature-card"><div className="feature-icon">📦</div><div><h4>صيغ واضحة</h4><p>صور ومستندات وبيانات، مع إظهار خيارات التحويل المناسبة لكل ملف.</p></div></div>
       </section>
+      <footer className="shell footer">لا يدعم التطبيق كل صيغ الملفات. تتم معالجة الملفات مؤقتاً على خادم Vercel؛ لا ترفع ملفات حساسة.</footer>
     </main>
   );
 }

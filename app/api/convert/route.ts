@@ -4,292 +4,143 @@ import sharp from 'sharp';
 import * as mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 
-const SUPPORTED = new Set(['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp', 'pdf', 'txt', 'md', 'html', 'json', 'csv', 'xml', 'docx', 'zip']);
+export const runtime = 'nodejs';
+export const maxDuration = 30;
 
-function normaliseFormat(name: string) {
-  return (name || '').replace(/^\./, '').toLowerCase();
-}
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const IMAGE_INPUTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp']);
+const TEXT_INPUTS = new Set(['txt', 'md', 'html', 'json', 'csv', 'xml', 'docx']);
+const TARGETS: Record<string, Set<string>> = {
+  png: new Set(['jpg', 'webp', 'avif', 'pdf']), jpg: new Set(['png', 'webp', 'avif', 'pdf']),
+  jpeg: new Set(['png', 'webp', 'avif', 'pdf']), webp: new Set(['png', 'jpg', 'avif', 'pdf']),
+  avif: new Set(['png', 'jpg', 'webp', 'pdf']), bmp: new Set(['png', 'jpg', 'webp', 'pdf']),
+  txt: new Set(['md', 'html', 'json', 'docx']), md: new Set(['txt', 'html', 'docx']),
+  html: new Set(['txt', 'md', 'docx']), json: new Set(['txt', 'csv', 'html', 'docx']),
+  csv: new Set(['txt', 'json', 'docx']), xml: new Set(['txt']),
+  docx: new Set(['txt', 'md', 'html']),
+};
 
-function getMimeType(ext: string) {
-  const map: Record<string, string> = {
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    webp: 'image/webp',
-    avif: 'image/avif',
-    bmp: 'image/bmp',
-    pdf: 'application/pdf',
-    txt: 'text/plain; charset=utf-8',
-    md: 'text/markdown; charset=utf-8',
-    html: 'text/html; charset=utf-8',
-    json: 'application/json; charset=utf-8',
-    csv: 'text/csv; charset=utf-8',
-    xml: 'application/xml; charset=utf-8',
+function extOf(name: string) { return (name.split('.').pop() || '').toLowerCase(); }
+function mimeOf(ext: string) {
+  const types: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', avif: 'image/avif',
+    pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', md: 'text/markdown; charset=utf-8',
+    html: 'text/html; charset=utf-8', json: 'application/json; charset=utf-8', csv: 'text/csv; charset=utf-8',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    zip: 'application/zip',
   };
-
-  return map[ext] || 'application/octet-stream';
+  return types[ext] || 'application/octet-stream';
 }
-
-async function readText(file: File) {
-  const buffer = Buffer.from(await file.arrayBuffer());
-  return buffer.toString('utf-8');
-}
-
 function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
-
 function parseCsv(text: string) {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
+  const rows: string[][] = []; let row: string[] = []; let current = ''; let quoted = false;
   for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '"') {
-      if (inQuotes && text[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-    if (ch === ',' && !inQuotes) {
-      row.push(current);
-      current = '';
-      continue;
-    }
-    if ((ch === '\n' || ch === '\r') && !inQuotes) {
-      if (ch === '\r' && text[i + 1] === '\n') i++;
-      row.push(current);
-      if (row.some((cell) => cell.trim() !== '')) rows.push(row);
-      row = [];
-      current = '';
-      continue;
-    }
-    current += ch;
+    const char = text[i];
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') { current += '"'; i++; }
+      else if (char === '"') quoted = false;
+      else current += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ',') { row.push(current); current = ''; }
+    else if (char === '\n' || char === '\r') {
+      if (char === '\r' && text[i + 1] === '\n') i++;
+      row.push(current); if (row.some((cell) => cell.trim())) rows.push(row); row = []; current = '';
+    } else current += char;
   }
-
-  if (current || row.length) {
-    row.push(current);
-    if (row.some((cell) => cell.trim() !== '')) rows.push(row);
-  }
-
+  if (current || row.length) { row.push(current); if (row.some((cell) => cell.trim())) rows.push(row); }
   return rows;
 }
-
 function csvToJson(text: string) {
   const rows = parseCsv(text);
   if (!rows.length) return '[]';
-  const headers = rows[0].map((h, index) => h.trim() || `column_${index + 1}`);
-  const data = rows.slice(1).map((row) => {
-    const obj: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      obj[header] = row[index] ?? '';
-    });
-    return obj;
-  });
-  return JSON.stringify(data, null, 2);
+  const headers = rows[0].map((value, i) => value.trim() || `column_${i + 1}`);
+  return JSON.stringify(rows.slice(1).map((row) => Object.fromEntries(headers.map((header, i) => [header, row[i] ?? '']))), null, 2);
 }
-
 function jsonToCsv(text: string) {
-  const data = JSON.parse(text);
-  if (!Array.isArray(data) || data.length === 0 || typeof data[0] !== 'object') {
-    throw new Error('يجب أن يكون JSON على هيئة مصفوفة من الكائنات لتحويله إلى CSV.');
-  }
-  const headers = [...new Set(data.flatMap((item: any) => Object.keys(item)))] as string[];
-  const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-  const rows = [headers.map(escape).join(',')];
-  data.forEach((item: any) => {
-    rows.push(headers.map((header) => escape(item[header])).join(','));
-  });
-  return rows.join('\n');
+  const data: unknown = JSON.parse(text);
+  if (!Array.isArray(data) || data.length === 0 || typeof data[0] !== 'object' || data[0] === null) throw new Error('يجب أن يحتوي JSON على مصفوفة من الكائنات لتحويله إلى CSV.');
+  const records = data as Record<string, unknown>[];
+  const headers = [...new Set(records.flatMap((item) => Object.keys(item)))];
+  const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  return [headers.map(quote).join(','), ...records.map((item) => headers.map((header) => quote(item[header])).join(','))].join('\r\n');
 }
-
-function htmlFromText(text: string) {
-  const safe = escapeHtml(text).replace(/\n{2,}/g, '</p><p>');
-  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>مستند محوّل</title></head><body style="font-family:Tahoma,Arial,sans-serif;line-height:1.8;padding:40px;max-width:800px;margin:auto;"> <p>${safe.replace(/\n/g, '<br>')}</p></body></html>`;
+function textToHtml(text: string) {
+  const paragraphs = escapeHtml(text).split(/\n{2,}/).map((part) => `<p>${part.replace(/\n/g, '<br>')}</p>`).join('\n');
+  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>مستند محوّل</title></head><body style="font:16px/1.8 system-ui,sans-serif;max-width:800px;margin:40px auto;padding:20px">${paragraphs}</body></html>`;
 }
-
 function markdownToHtml(text: string) {
-  const safe = escapeHtml(text)
-    .replace(/^### (.*)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.*)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.*)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\n/g, '<br>');
-  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>Markdown</title></head><body style="font-family:Tahoma,Arial,sans-serif;line-height:1.8;padding:40px;max-width:800px;margin:auto;">${safe}</body></html>`;
+  const html = escapeHtml(text).replace(/^### (.*)$/gm, '<h3>$1</h3>').replace(/^## (.*)$/gm, '<h2>$1</h2>').replace(/^# (.*)$/gm, '<h1>$1</h1>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\n/g, '<br>');
+  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>مستند محوّل</title></head><body style="font:16px/1.8 system-ui,sans-serif;max-width:800px;margin:40px auto;padding:20px">${html}</body></html>`;
 }
-
+function htmlToText(text: string) { return text.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<br\s*\/?>|<\/p>|<\/div>|<\/h[1-6]>/gi, '\n').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim(); }
 async function textToDocx(text: string) {
-  const doc = new Document({
-    sections: [{
-      properties: {},
-      children: text.split('\n').map((line) => new Paragraph({ children: [new TextRun({ text: line || ' ', size: 24 })] }))
-    }],
-  });
-  const buffer = await Packer.toBuffer(doc);
-  return new Uint8Array(buffer);
+  const document = new Document({ sections: [{ children: text.split('\n').map((line) => new Paragraph({ children: [new TextRun(line || ' ')] })) }] });
+  return new Uint8Array(await Packer.toBuffer(document));
 }
 
-async function docxToText(buffer: Buffer) {
-  const result = await mammoth.extractRawText({ buffer });
-  return result.value;
-}
-
-async function imageToPdf(buffer: Buffer) {
-  const image = await sharp(buffer).rotate().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } }).toFormat('png').toBuffer();
-  const sharpMeta = await sharp(image).metadata();
-  const pdf = await PDFDocument.create();
-  const page = pdf.addPage([Number(sharpMeta.width || 600), Number(sharpMeta.height || 800)]);
-  const embedded = await pdf.embedPng(image);
-  page.drawImage(embedded, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
-  return Buffer.from(await pdf.save());
-}
-
-async function convertFile(originalName: string, file: File, targetFormat: string) {
-  const inputExt = normaliseFormat(originalName);
-  const normalTarget = normaliseFormat(targetFormat);
-  const buffer = Buffer.from(await file.arrayBuffer());
-
-  if (!SUPPORTED.has(inputExt)) {
-    throw new Error(`صيغة الإدخال ${inputExt || 'غير معروفة'} غير مدعومة.`);
-  }
-
-  if (!SUPPORTED.has(normalTarget)) {
-    throw new Error(`صيغة الإخراج ${normalTarget} غير مدعومة.`);
-  }
-
-  if (['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp'].includes(inputExt) && ['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp'].includes(normalTarget)) {
-    const output = await sharp(buffer).toFormat(normalTarget === 'jpg' ? 'jpeg' : normalTarget as any).toBuffer();
-    return { buffer: output, ext: normalTarget, mimeType: getMimeType(normalTarget) };
-  }
-
-  if (['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp'].includes(inputExt) && normalTarget === 'pdf') {
-    const output = await imageToPdf(buffer);
-    return { buffer: output, ext: 'pdf', mimeType: getMimeType('pdf') };
-  }
-
-  if (inputExt === 'pdf' && ['png', 'jpg', 'jpeg', 'webp', 'avif', 'bmp'].includes(normalTarget)) {
-    const image = await sharp(buffer).toFormat(normalTarget === 'jpg' ? 'jpeg' : normalTarget as any).toBuffer();
-    return { buffer: image, ext: normalTarget, mimeType: getMimeType(normalTarget) };
-  }
-
-  if (['txt', 'md', 'html', 'json', 'csv', 'xml'].includes(inputExt) || inputExt === 'docx') {
-    let text = '';
-    if (inputExt === 'docx') {
-      text = await docxToText(buffer);
-    } else {
-      text = buffer.toString('utf-8');
+async function convert(file: File, source: string, target: string): Promise<Uint8Array> {
+  const input = Buffer.from(await file.arrayBuffer());
+  if (IMAGE_INPUTS.has(source)) {
+    if (target === 'pdf') {
+      const png = await sharp(input).rotate().png().toBuffer();
+      const metadata = await sharp(png).metadata();
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage([metadata.width || 600, metadata.height || 800]);
+      const image = await pdf.embedPng(png);
+      page.drawImage(image, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
+      return new Uint8Array(await pdf.save());
     }
-
-    if (normalTarget === 'txt') {
-      return { buffer: Buffer.from(text, 'utf-8'), ext: 'txt', mimeType: getMimeType('txt') };
-    }
-
-    if (normalTarget === 'html') {
-      const content = inputExt === 'md' ? markdownToHtml(text) : inputExt === 'json' ? htmlFromText(JSON.stringify(JSON.parse(text), null, 2)) : inputExt === 'csv' ? htmlFromText(text) : text;
-      return { buffer: Buffer.from(content, 'utf-8'), ext: 'html', mimeType: getMimeType('html') };
-    }
-
-    if (normalTarget === 'md') {
-      const content = inputExt === 'html' ? text.replace(/<[^>]+>/g, '\n').replace(/\n{2,}/g, '\n').trim() : text;
-      return { buffer: Buffer.from(content, 'utf-8'), ext: 'md', mimeType: getMimeType('md') };
-    }
-
-    if (normalTarget === 'json') {
-      if (inputExt === 'csv') {
-        return { buffer: Buffer.from(csvToJson(text), 'utf-8'), ext: 'json', mimeType: getMimeType('json') };
-      }
-      JSON.parse(text);
-      return { buffer: Buffer.from(JSON.stringify(JSON.parse(text), null, 2), 'utf-8'), ext: 'json', mimeType: getMimeType('json') };
-    }
-
-    if (normalTarget === 'csv') {
-      if (inputExt === 'json') {
-        return { buffer: Buffer.from(jsonToCsv(text), 'utf-8'), ext: 'csv', mimeType: getMimeType('csv') };
-      }
-      return { buffer: Buffer.from(text, 'utf-8'), ext: 'csv', mimeType: getMimeType('csv') };
-    }
-
-    if (normalTarget === 'xml') {
-      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<root>${escapeHtml(text)}</root>`;
-      return { buffer: Buffer.from(xml, 'utf-8'), ext: 'xml', mimeType: getMimeType('xml') };
-    }
-
-    if (normalTarget === 'docx') {
-      const output = await textToDocx(text);
-      return { buffer: Buffer.from(output), ext: 'docx', mimeType: getMimeType('docx') };
-    }
+    const format = target === 'jpg' ? 'jpeg' : target;
+    return new Uint8Array(await sharp(input).rotate().toFormat(format as 'png' | 'jpeg' | 'webp' | 'avif').toBuffer());
   }
 
-  if (inputExt === 'json' && normalTarget === 'csv') {
-    return { buffer: Buffer.from(jsonToCsv(buffer.toString('utf-8')), 'utf-8'), ext: 'csv', mimeType: getMimeType('csv') };
+  let text = source === 'docx' ? (await mammoth.extractRawText({ buffer: input })).value : input.toString('utf8');
+  if (target === 'txt') {
+    if (source === 'html') text = htmlToText(text);
+    return new TextEncoder().encode(text);
   }
-
-  if (inputExt === 'csv' && normalTarget === 'json') {
-    return { buffer: Buffer.from(csvToJson(buffer.toString('utf-8')), 'utf-8'), ext: 'json', mimeType: getMimeType('json') };
+  if (target === 'md') {
+    if (source === 'html') text = htmlToText(text);
+    return new TextEncoder().encode(text);
   }
-
-  if (inputExt === 'txt' && normalTarget === 'html') {
-    return { buffer: Buffer.from(htmlFromText(buffer.toString('utf-8')), 'utf-8'), ext: 'html', mimeType: getMimeType('html') };
+  if (target === 'html') {
+    if (source === 'md') text = markdownToHtml(text);
+    else if (source !== 'html') text = textToHtml(source === 'json' ? JSON.stringify(JSON.parse(text), null, 2) : text);
+    return new TextEncoder().encode(text);
   }
-
-  if (inputExt === 'txt' && normalTarget === 'md') {
-    return { buffer: Buffer.from(buffer.toString('utf-8'), 'utf-8'), ext: 'md', mimeType: getMimeType('md') };
+  if (target === 'json') {
+    const json = source === 'csv' ? csvToJson(text) : JSON.stringify(JSON.parse(text), null, 2);
+    return new TextEncoder().encode(json);
   }
-
-  if (inputExt === 'html' && normalTarget === 'txt') {
-    return { buffer: Buffer.from(buffer.toString('utf-8').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(), 'utf-8'), ext: 'txt', mimeType: getMimeType('txt') };
-  }
-
-  if (inputExt === 'html' && normalTarget === 'md') {
-    const text = buffer.toString('utf-8').replace(/<[^>]+>/g, '\n').replace(/\n{2,}/g, '\n').trim();
-    return { buffer: Buffer.from(text, 'utf-8'), ext: 'md', mimeType: getMimeType('md') };
-  }
-
-  if (normalTarget === inputExt) {
-    return { buffer, ext: inputExt, mimeType: getMimeType(inputExt) };
-  }
-
-  throw new Error(`لا توجد تحويلات مدعومة من ${inputExt} إلى ${normalTarget}.`);
+  if (target === 'csv') return new TextEncoder().encode(jsonToCsv(text));
+  if (target === 'docx') return textToDocx(text);
+  throw new Error(`التحويل من ${source} إلى ${target} غير متاح.`);
 }
 
 export async function POST(request: Request) {
   try {
     const form = await request.formData();
-    const file = form.get('file') as File | null;
-    const targetFormat = String(form.get('targetFormat') || '').trim();
+    const file = form.get('file');
+    const target = String(form.get('targetFormat') || '').toLowerCase();
+    if (!(file instanceof File)) return NextResponse.json({ error: 'لم يتم إرسال ملف صالح.' }, { status: 400 });
+    if (file.size === 0) return NextResponse.json({ error: 'الملف فارغ.' }, { status: 400 });
+    if (file.size > MAX_FILE_BYTES) return NextResponse.json({ error: 'الحد الأقصى لحجم الملف 4 ميجابايت.' }, { status: 413 });
 
-    if (!file) {
-      return NextResponse.json({ error: 'لم يتم إرسال ملف.' }, { status: 400 });
-    }
+    const source = extOf(file.name);
+    if (!IMAGE_INPUTS.has(source) && !TEXT_INPUTS.has(source)) return NextResponse.json({ error: 'صيغة الملف غير مدعومة.' }, { status: 415 });
+    if (!TARGETS[source]?.has(target)) return NextResponse.json({ error: `التحويل من ${source} إلى ${target || 'الصيغة المطلوبة'} غير مدعوم.` }, { status: 400 });
 
-    const originalName = file.name;
-    const result = await convertFile(originalName, file, targetFormat);
-    const fileName = `${originalName.replace(/\.[^/.]+$/, '') || 'converted-file'}.${result.ext}`;
-
-    return new Response(result.buffer, {
-      headers: {
-        'Content-Type': result.mimeType,
-        'Content-Disposition': `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-      },
-    });
-  } catch (error: any) {
-    return NextResponse.json(
-      { error: error?.message || 'حدث خطأ في التحويل.' },
-      { status: 400 }
-    );
+    const output = await convert(file, source, target);
+    const base = file.name.replace(/\.[^/.]+$/, '') || 'converted-file';
+    const fileName = `${base}.${target}`;
+    return new Response(output, { headers: {
+      'Content-Type': mimeOf(target),
+      'Content-Disposition': `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      'Cache-Control': 'no-store',
+    } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'حدث خطأ أثناء التحويل.';
+    return NextResponse.json({ error: message }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
   }
 }
