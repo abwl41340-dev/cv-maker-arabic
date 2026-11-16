@@ -1,0 +1,30 @@
+{
+  "name": "file-converter-pro",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "docx": "^9.3.0",
+    "html-to-docx": "^1.10.0",
+    "mammoth": "^1.8.0",
+    "next": "14.2.15",
+    "pdf-lib": "^1.17.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.12",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.15",
+    "typescript": "5.5.4"
+  }
+}
